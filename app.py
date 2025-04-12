@@ -187,12 +187,10 @@ chat_with_history: Runnable = RunnableWithMessageHistory(
 # ------------------------------------------------------------------------------
 # Streamlit UI
 # ------------------------------------------------------------------------------
-
 st.set_page_config(page_title="LLM-REALTOR")
-st.title("🏠 LLM REALTOR")
+st.title("🏠 Apartment Search")
 
-user_input = st.chat_input("Ask me anything!")
-
+# Message session remains
 if 'messages' not in st.session_state:
     st.session_state['messages'] = []
 
@@ -200,17 +198,52 @@ for message in st.session_state['messages']:
     with st.chat_message(message['role']):
         st.markdown(message['content'])
 
-if user_input:
-    st.session_state['messages'].append({'role': 'user', 'content': user_input})
+# Enter the location
+location = st.text_input("📍 Enter a location (e.g., Los Angeles, CA):")
 
-    with st.chat_message("user"):
-        st.markdown(user_input)
+# Choose the additional filter
+with st.expander("🔎 Advanced Filters"):
+    beds = st.selectbox("Beds", ["Any", 1, 2, 3, 4, 5])
+    baths = st.selectbox("Baths", ["Any", 1, 2, 3, 4, 5])
+    min_price, max_price = st.slider("Price Range ($)", 500, 5000, (1000, 3000))
+    pets_allowed = st.checkbox("🐶 Pets Allowed")
+    parking_included = st.checkbox("🚗 Parking Included")
+    amenities = st.multiselect(
+        "✨ Amenities",
+        ["Gym", "Pool", "Laundry", "Elevator", "Air Conditioning", "Dishwasher"]
+    )
 
-    websites = ["apartments.com"]
-    graph_input = {"query": user_input, "websites": websites}
-    response = agentic_rag_pipeline.invoke(graph_input)['answer']
+# Generate final query
+query_parts = [f"apartments in {location}"]
+if beds != "Any":
+    query_parts.append(f"{beds} bed")
+if baths != "Any":
+    query_parts.append(f"{baths} bath")
+query_parts.append(f"${min_price}-${max_price}")
+if pets_allowed:
+    query_parts.append("pets allowed")
+if parking_included:
+    query_parts.append("parking included")
+if amenities:
+    query_parts.extend(amenities)
 
-    with st.chat_message("assistant"):
-        st.markdown(response)
+final_query = ", ".join(query_parts)
 
-    st.session_state['messages'].append({'role': 'assistant', 'content': response})
+st.write(f"🔍 **Search query:** {final_query}")
+
+# Call the LangGraph pipeline when click the search button
+if st.button("🔍 Search Apartments"):
+    if not location.strip():
+        st.error("🚨 Please enter a valid location.")
+    else:
+        with st.spinner("Searching for apartments..."):
+            websites = ["apartments.com"]
+            graph_input = {"query": final_query, "websites": websites}
+            response = agentic_rag_pipeline.invoke(graph_input)['answer']
+
+        with st.chat_message("assistant"):
+            st.markdown(response)
+
+        # Add on message session
+        st.session_state['messages'].append({'role': 'user', 'content': final_query})
+        st.session_state['messages'].append({'role': 'assistant', 'content': response})
