@@ -23,6 +23,7 @@ dependencies = [
     "langsmith (>=0.3.18,<0.4.0)",
     "python-decouple (>=3.8,<4.0)",
     "langchain (>=0.3.21,<0.4.0)",
+    "duckduckgo-search (>=2025.4.4,<2026.0.0)",
 ]
 
 [build-system]
