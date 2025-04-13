@@ -36,6 +36,8 @@ class PipelineState(TypedDict):
     top_docs: List[Document]
     messages: str
     answer: str
+    num_docs: int
+
 
 # ------------------------------------------------------------------------------
 # DuckDuckGo Loader
@@ -85,7 +87,7 @@ def parse_unit_filter(query: str):
 
 def retriever_node(state: PipelineState):
     filters = parse_unit_filter(state["query"])
-    docs = vector_store.similarity_search(state["query"])
+    docs = vector_store.similarity_search(state["query"], k=state["num_docs"])
 
     def matches_unit(doc):
         text = doc.page_content.lower()
@@ -190,7 +192,6 @@ chat_with_history: Runnable = RunnableWithMessageHistory(
 st.set_page_config(page_title="LLM-REALTOR")
 st.title("🏠 Apartment Search")
 
-# Message session remains
 if 'messages' not in st.session_state:
     st.session_state['messages'] = []
 
@@ -198,14 +199,13 @@ for message in st.session_state['messages']:
     with st.chat_message(message['role']):
         st.markdown(message['content'])
 
-# Enter the location
 location = st.text_input("📍 Enter a location (e.g., Los Angeles, CA):")
 
-# Choose the additional filter
 with st.expander("🔎 Advanced Filters"):
     beds = st.selectbox("Beds", ["Any", 1, 2, 3, 4, 5])
     baths = st.selectbox("Baths", ["Any", 1, 2, 3, 4, 5])
-    min_price, max_price = st.slider("Price Range ($)", 500, 5000, (1000, 3000))
+    default_price_range: tuple = (1000, 3000)
+    min_price, max_price = st.slider("Price Range ($)", 500, 5000, default_price_range)
     pets_allowed = st.checkbox("🐶 Pets Allowed")
     parking_included = st.checkbox("🚗 Parking Included")
     amenities = st.multiselect(
@@ -213,37 +213,69 @@ with st.expander("🔎 Advanced Filters"):
         ["Gym", "Pool", "Laundry", "Elevator", "Air Conditioning", "Dishwasher"]
     )
 
-# Generate final query
-query_parts = [f"apartments in {location}"]
-if beds != "Any":
-    query_parts.append(f"{beds} bed")
-if baths != "Any":
-    query_parts.append(f"{baths} bath")
-query_parts.append(f"${min_price}-${max_price}")
-if pets_allowed:
-    query_parts.append("pets allowed")
-if parking_included:
-    query_parts.append("parking included")
-if amenities:
-    query_parts.extend(amenities)
+num_docs = st.slider("📚 Number of documents to search", min_value=3, max_value=100, value=20)
+query_parts = [f"{location} apartments"]
 
-final_query = ", ".join(query_parts)
+if beds != "Any":
+    query_parts.append(f"{beds} bedrooms")
+
+if baths != "Any":
+    query_parts.append(f"{baths} bathrooms")
+
+query_parts.append(f"rent from \${min_price} to \${max_price}")
+
+if pets_allowed:
+    query_parts.append("pet-friendly")
+
+if parking_included:
+    query_parts.append("parking available")
+
+if amenities:
+    query_parts.append("Amenities: " + ", ".join(amenities))
+
+final_query = " ".join(query_parts)
 
 st.write(f"🔍 **Search query:** {final_query}")
 
-# Call the LangGraph pipeline when click the search button
 if st.button("🔍 Search Apartments"):
     if not location.strip():
         st.error("🚨 Please enter a valid location.")
     else:
         with st.spinner("Searching for apartments..."):
             websites = ["apartments.com"]
-            graph_input = {"query": final_query, "websites": websites}
+            graph_input = {
+                "query": final_query,
+                "websites": websites,
+                "num_docs": num_docs
+            }
             response = agentic_rag_pipeline.invoke(graph_input)['answer']
 
-        with st.chat_message("assistant"):
-            st.markdown(response)
+        # 정확한 결과가 없을 때
+        if "No exact match" in response or "couldn’t find any listings" in response:
+            st.warning("⚠️ No exact matches found for your criteria.")
 
-        # Add on message session
-        st.session_state['messages'].append({'role': 'user', 'content': final_query})
-        st.session_state['messages'].append({'role': 'assistant', 'content': response})
+            choice = st.radio(
+                "Would you like to see similar listings or adjust your search?",
+                ["✨ See similar listings", "🔄 Adjust search criteria"]
+            )
+
+            if choice == "✨ See similar listings":
+                with st.spinner("Looking for similar listings..."):
+                    relaxed_query = f"similar apartments near {location}, {beds} bed, {baths} bath, \${min_price}-\${max_price}"
+                    relaxed_graph_input = {
+                        "query": relaxed_query,
+                        "websites": websites,
+                        "num_docs": num_docs + 5
+                    }
+                    relaxed_response = agentic_rag_pipeline.invoke(relaxed_graph_input)['answer']
+                st.markdown(relaxed_response)
+                st.session_state['messages'].append({'role': 'user', 'content': relaxed_query})
+                st.session_state['messages'].append({'role': 'assistant', 'content': relaxed_response})
+
+            elif choice == "🔄 Adjust search criteria":
+                st.info("Please adjust your criteria and search again.")
+
+        else:
+            st.markdown(response)
+            st.session_state['messages'].append({'role': 'user', 'content': final_query})
+            st.session_state['messages'].append({'role': 'assistant', 'content': response})
