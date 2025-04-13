@@ -14,6 +14,7 @@ from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import StateGraph
 import re
+from difflib import SequenceMatcher
 
 # ------------------------------------------------------------------------------
 # Environment & Global Setup
@@ -87,23 +88,57 @@ def parse_unit_filter(query: str):
 
 def retriever_node(state: PipelineState):
     filters = parse_unit_filter(state["query"])
+
+    # 더 많은 문서를 검색해서 다양성 확보
     docs = vector_store.similarity_search(state["query"], k=state["num_docs"])
 
+    def normalize(text):
+        """문장 전체를 소문자로 만들고 숫자를 단어로 바꾸는 함수"""
+        text = text.lower()
+        text = text.replace("1", "one").replace("2", "two").replace("3", "three")
+        text = text.replace("4", "four").replace("5", "five")
+        return text
+
     def matches_unit(doc):
-        text = doc.page_content.lower()
-        if "bed" in filters and f"{filters['bed']} bed" not in text:
-            return False
-        if "bath" in filters and f"{filters['bath']} bath" not in text:
-            return False
+        text = normalize(doc.page_content)
+
+        # 유연한 bed 매칭
+        if "bed" in filters:
+            bed_keywords = [
+                f"{filters['bed']} bed",
+                f"{filters['bed']} bedroom",
+                f"{filters['bed']} bedrooms",
+                f"{filters['bed']}br",
+                f"{filters['bed']}-bedroom",
+            ]
+            bed_match = any(keyword in text for keyword in bed_keywords)
+            if not bed_match:
+                return False
+
+        # 유연한 bath 매칭
+        if "bath" in filters:
+            bath_keywords = [
+                f"{filters['bath']} bath",
+                f"{filters['bath']} bathroom",
+                f"{filters['bath']} bathrooms",
+                f"{filters['bath']}-bath",
+            ]
+            bath_match = any(keyword in text for keyword in bath_keywords)
+            if not bath_match:
+                return False
+
         return True
 
+    # 필터를 통과한 문서들
     filtered_docs = [doc for doc in docs if matches_unit(doc)]
-    state["context"] = filtered_docs or docs  # fallback to original if all filtered out
 
-    # Optional debug logs
+    # fallback: 필터된 문서가 없으면 전체를 사용
+    state["context"] = filtered_docs or docs
+
+    # 디버그 출력 (옵션)
     print("Parsed filters:", filters)
     print("Retrieved docs:", len(docs))
-    print("Filtered docs:", len(filtered_docs))
+    print("Filtered docs after relaxed matching:", len(filtered_docs))
 
     return state
 
