@@ -14,6 +14,7 @@ from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import StateGraph
 import re
+from difflib import SequenceMatcher
 
 # ------------------------------------------------------------------------------
 # Environment & Global Setup
@@ -87,23 +88,57 @@ def parse_unit_filter(query: str):
 
 def retriever_node(state: PipelineState):
     filters = parse_unit_filter(state["query"])
+
+    # 더 많은 문서를 검색해서 다양성 확보
     docs = vector_store.similarity_search(state["query"], k=state["num_docs"])
 
+    def normalize(text):
+        """문장 전체를 소문자로 만들고 숫자를 단어로 바꾸는 함수"""
+        text = text.lower()
+        text = text.replace("1", "one").replace("2", "two").replace("3", "three")
+        text = text.replace("4", "four").replace("5", "five")
+        return text
+
     def matches_unit(doc):
-        text = doc.page_content.lower()
-        if "bed" in filters and f"{filters['bed']} bed" not in text:
-            return False
-        if "bath" in filters and f"{filters['bath']} bath" not in text:
-            return False
+        text = normalize(doc.page_content)
+
+        # 유연한 bed 매칭
+        if "bed" in filters:
+            bed_keywords = [
+                f"{filters['bed']} bed",
+                f"{filters['bed']} bedroom",
+                f"{filters['bed']} bedrooms",
+                f"{filters['bed']}br",
+                f"{filters['bed']}-bedroom",
+            ]
+            bed_match = any(keyword in text for keyword in bed_keywords)
+            if not bed_match:
+                return False
+
+        # 유연한 bath 매칭
+        if "bath" in filters:
+            bath_keywords = [
+                f"{filters['bath']} bath",
+                f"{filters['bath']} bathroom",
+                f"{filters['bath']} bathrooms",
+                f"{filters['bath']}-bath",
+            ]
+            bath_match = any(keyword in text for keyword in bath_keywords)
+            if not bath_match:
+                return False
+
         return True
 
+    # 필터를 통과한 문서들
     filtered_docs = [doc for doc in docs if matches_unit(doc)]
-    state["context"] = filtered_docs or docs  # fallback to original if all filtered out
 
-    # Optional debug logs
+    # fallback: 필터된 문서가 없으면 전체를 사용
+    state["context"] = filtered_docs or docs
+
+    # 디버그 출력 (옵션)
     print("Parsed filters:", filters)
     print("Retrieved docs:", len(docs))
-    print("Filtered docs:", len(filtered_docs))
+    print("Filtered docs after relaxed matching:", len(filtered_docs))
 
     return state
 
@@ -114,48 +149,46 @@ def retriever_node(state: PipelineState):
 def generator_node(state: PipelineState):
     if not state["context"]:
         state["answer"] = (
-            "Sorry, I couldn’t find any listings that match all your criteria exactly. "
-            "Try modifying your query or removing some filters."
+            "⚠️ No listings were found in the context. Try modifying your filters."
         )
         return state
 
+    # context를 보기 좋게 구성
     docs_content = "\n\n".join(
         f"{doc.page_content}\n[Source]({doc.metadata.get('source', '')})"
         for doc in state["context"]
     )
+
+    # 대화 프롬프트 설정
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a precise and strict real estate recommendation engine. "
-                "You must select **only one** apartment listing that matches the user’s search query **exactly** and use information strictly from the provided crawled context. "
-                "You are not allowed to guess, infer, or assume anything. "
-                "Only recommend listings that meet all parts of the user's query as explicitly stated in the context. "
-                "Do NOT relax the match. For example, if the query asks for '2 bed, 2 bath', you must find a listing that explicitly includes both '2 bed' and '2 bath' in the same description. "
-                "Do not recommend listings that say '1 bath' or are missing any required detail. "
-                "Do NOT state assumptions like 'likely a typo' or make excuses for mismatched data. "
-                "The output must include exactly and only what's in the crawled context: apartment name, address, unit type (must match), and the listing URL (must come from the same listing block). "
-                "Never invent or adjust any details. Omit any field that is not present. Do not hallucinate or rationalize missing or conflicting data."
+                "You are a real estate recommendation assistant.\n"
+                "From the provided apartment listings, try to recommend **the best match** for the user's query.\n"
+                "If one listing matches the query exactly (e.g., 2 bed, 2 bath), highlight it clearly.\n"
+                "If not, recommend the closest available match and clearly say it is not an exact match.\n"
+                "Only use the context provided below. Do not invent or assume any information.\n"
             )
         },
         {
             "role": "user",
             "content": (
-                f"{state['query']}\n\n"
-                "Below is the crawled context from apartments.com:\n\n"
+                f"User's query: {state['query']}\n\n"
+                "Below is the crawled apartment listing context:\n\n"
                 f"{docs_content}\n\n"
-                "Based **only** on this context, recommend **one** specific apartment listing that matches the query **exactly** (e.g., 2 bed, 2 bath, located in LA, CA).\n\n"
-                "If such listing exists, output the result clearly in the following format:\n\n"
+                "Please recommend the most relevant apartment in this format:\n\n"
                 "🏢 Apartment Name: <name>\n"
                 "📍 Address: <address or 'Not stated'>\n"
-                "🛏️ Unit Type: <exact unit type as found in text>\n"
-                "✨ Amenities: <if any>\n"
-                "🔗 URL: <valid link>\n\n"
-                "If no listing matches the request exactly, say:\n"
-                "\"⚠️ No exact match for '2 bed, 2 bath' was found in the context.\""
+                "🛏️ Unit Type: <e.g., 2 bed 2 bath>\n"
+                "✨ Amenities: <if mentioned>\n"
+                "🔗 URL: <listing link>\n\n"
+                "At the top, indicate whether this is an exact match or not."
             )
         }
     ]
+
+    # LLM 호출
     response = llm.invoke(messages)
     state["answer"] = response.content
     return state
